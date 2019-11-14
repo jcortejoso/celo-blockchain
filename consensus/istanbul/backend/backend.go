@@ -165,6 +165,8 @@ type Backend struct {
 	dataDir string // A read-write data dir to persist files across restarts
 
 	newEpoch chan struct{}
+
+	delegateSignFeed event.Feed
 }
 
 // This is just for testing dont keep this
