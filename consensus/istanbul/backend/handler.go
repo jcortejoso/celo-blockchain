@@ -24,6 +24,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/istanbul"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/p2p"
 	lru "github.com/hashicorp/golang-lru"
 )
@@ -132,14 +133,15 @@ func (sb *Backend) HandleMsg(addr common.Address, msg p2p.Msg, peer consensus.Pe
 		} else if msg.Code == istanbulValEnodeShareMsg {
 			go sb.handleValEnodeShareMsg(data)
 		} else if msg.Code == istanbulDelegateSign {
-			sb.logger.Info("woohoo! got istanbulDelegateSign message", "msg", msg, "data string", string(data))
+			sb.logger.Warn("woohoo! got istanbulDelegateSign message", "msg", msg, "data string", string(data))
 
 			if sb.config.Proxy {
 				// got a signed message from the validator
-				sb.logger.Info("this is the proxy, got a signed message")
+				sb.logger.Warn("woohoo this is the proxy, got a signed message")
+				go sb.delegateSignFeed.Send(istanbul.MessageEvent{ Payload: data })
 			} else {
 				// assumes it's the proxied validator
-				sb.logger.Info("this is the proxied validator, will send a signed message")
+				sb.logger.Warn("woohoo this is the proxied validator, will send a signed message")
 				sb.proxyNode.peer.Send(istanbulDelegateSign, "signed woohoooo")
 			}
 
@@ -149,6 +151,11 @@ func (sb *Backend) HandleMsg(addr common.Address, msg p2p.Msg, peer consensus.Pe
 		return true, nil
 	}
 	return false, nil
+}
+
+// SubscribeNewDelegateSignEvent subscribes a channel to any new delegate sign messages
+func (sb *Backend) SubscribeNewDelegateSignEvent(ch chan<- istanbul.MessageEvent) event.Subscription {
+	return sb.delegateSignFeed.Subscribe(ch)
 }
 
 // SetBroadcaster implements consensus.Handler.SetBroadcaster
