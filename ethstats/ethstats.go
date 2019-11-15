@@ -30,6 +30,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/common/mclock"
@@ -64,6 +65,15 @@ const (
 
 	// valSetInterval is the frequency in blocks to send the validator set
 	valSetInterval = 10
+
+	actionBlock    = "block"
+	actionHello    = "hello"
+	actionHistory  = "history"
+	actionLatency  = "latency"
+	actionNodePing = "node-ping"
+	actionNodePong = "node-pong"
+	actionPending  = "pending"
+	actionStats    = "stats"
 )
 
 type txPool interface {
@@ -86,7 +96,6 @@ type Service struct {
 	backend *istanbulBackend.Backend // Istanbul consensus backend
 
 	node string // Name of the node to display on the monitoring page
-	pass string // Password to authorize access to the monitoring page
 	host string // Remote address of the monitoring service
 
 	pongCh chan struct{} // Pong notifications are fed into this channel
@@ -96,10 +105,10 @@ type Service struct {
 // New returns a monitoring service ready for stats reporting.
 func New(url string, ethServ *eth.Ethereum, lesServ *les.LightEthereum) (*Service, error) {
 	// Parse the netstats connection url
-	re := regexp.MustCompile("([^:@]*)(:([^@]*))?@(.+)")
+	re := regexp.MustCompile("([^:@]*)?@(.+)")
 	parts := re.FindStringSubmatch(url)
-	if len(parts) != 5 {
-		return nil, fmt.Errorf("invalid netstats url: \"%s\", should be nodename:secret@host:port", url)
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("invalid netstats url: \"%s\", should be nodename@host:port", url)
 	}
 	// Assemble and return the stats service
 	var (
@@ -122,8 +131,7 @@ func New(url string, ethServ *eth.Ethereum, lesServ *les.LightEthereum) (*Servic
 		engine:  engine,
 		backend: engine.(*istanbulBackend.Backend),
 		node:    id,
-		pass:    parts[3],
-		host:    parts[4],
+		host:    parts[2],
 		pongCh:  make(chan struct{}),
 		histCh:  make(chan []uint64, 1),
 	}, nil
@@ -325,7 +333,7 @@ func (s *Service) readLoop(conn *websocket.Conn) {
 				return
 			}
 			// If the message is a ping reply, deliver (someone must be listening!)
-			if len(msgEmit) == 2 && command == "node-pong" {
+			if len(msgEmit) == 2 && command == actionNodePong {
 				select {
 				case s.pongCh <- struct{}{}:
 					// Pong delivered, continue listening
@@ -337,7 +345,7 @@ func (s *Service) readLoop(conn *websocket.Conn) {
 				}
 			}
 			// If the message is a history request, forward to the event processor
-			if len(msgEmit) == 2 && command == "history" {
+			if len(msgEmit) == 2 && command == actionHistory {
 				// Make sure the request is valid and doesn't crash us
 				request, ok := msgEmit[1].(map[string]interface{})
 				if !ok {
@@ -368,7 +376,7 @@ func (s *Service) readLoop(conn *websocket.Conn) {
 			}
 		default:
 			// Report anything else and continue
-			log.Info("Unknown stats message", "msg", msg)
+			log.Info("Ping from websocket server", "msg", msg)
 			// Primus server might want to have a pong or it closes the connection
 			var serverTime = fmt.Sprintf("primus::pong::%d", time.Now().UnixNano()/int64(time.Millisecond))
 			websocket.JSON.Send(conn, serverTime)
@@ -396,7 +404,6 @@ type authMsg struct {
 	ID      string         `json:"id"`
 	Address common.Address `json:"address"`
 	Info    nodeInfo       `json:"info"`
-	Secret  string         `json:"secret"`
 }
 
 // login tries to authorize the client at the remote server.
@@ -435,9 +442,8 @@ func (s *Service) login(conn *websocket.Conn) error {
 			Client:   "0.1.1",
 			History:  true,
 		},
-		Secret: s.pass,
 	}
-	if err := s.sendStats(conn, "hello", auth); err != nil {
+	if err := s.sendStats(conn, actionHello, auth); err != nil {
 		return err
 	}
 	// Retrieve the remote ack or connection termination
@@ -477,7 +483,7 @@ func (s *Service) reportLatency(conn *websocket.Conn) error {
 		"id":         s.node,
 		"clientTime": start.String(),
 	}
-	if err := s.sendStats(conn, "node-ping", ping); err != nil {
+	if err := s.sendStats(conn, actionNodePing, ping); err != nil {
 		return err
 	}
 	// Wait for the pong request to arrive back
@@ -497,7 +503,7 @@ func (s *Service) reportLatency(conn *websocket.Conn) error {
 		"id":      s.node,
 		"latency": latency,
 	}
-	return s.sendStats(conn, "latency", stats)
+	return s.sendStats(conn, actionLatency, stats)
 }
 
 // blockStats is the information to report about individual blocks.
@@ -531,13 +537,8 @@ type uncleStats []*types.Header
 
 func (s *Service) sendStats(conn *websocket.Conn, action string, stats interface{}) error {
 
-
-
-	nodeKey := s.backend.GetNodeKey()
-	pubkey := crypto.FromECDSAPub(&nodeKey.PublicKey)
 	msg, _ := json.Marshal(stats)
 	msgHash := crypto.Keccak256Hash(msg)
-	signature, _ := crypto.Sign(msgHash.Bytes(), nodeKey)
 
 	proxiedPeer := s.backend.ProxiedPeer()
 	log.Info("inside sendStats")
@@ -550,27 +551,54 @@ func (s *Service) sendStats(conn *websocket.Conn, action string, stats interface
 
 	return nil
 
-	// Server-side verification in go:
+	etherBase, errEtherbase := s.eth.Etherbase()
+	if errEtherbase != nil {
+		return errEtherbase
+	}
+
+	account := accounts.Account{Address: etherBase}
+	wallet, errWallet := s.eth.AccountManager().Find(account)
+	if errWallet != nil {
+		return errWallet
+	}
+
+	pubkey, errPubkey := wallet.GetPublicKey(account)
+	if errPubkey != nil {
+		return errPubkey
+	}
+	pubkeyBytes := crypto.FromECDSAPub(pubkey)
+
+	signature, errSign := wallet.SignHash(account, msgHash.Bytes())
+	if errSign != nil {
+		return errSign
+	}
+
+	/* Server-side verification in go: */
 	// 	sig := signature[:len(signature)-1]
 	// 	verified := crypto.VerifySignature(pubkey, msgHash.Bytes(), sig)
-	//
-	// Client-side verification in JS:
+	//				& address == crypto.PubkeyToAddress(*pubkey).Hex()
+
+	/* Client-side verification in JS: */
 	//	const { Keccak } = require('sha3');
-	//  const EC = require('elliptic').ec;
-	// 	const hasher = new Keccak(256)
+	// 	const EC = require('elliptic').ec;
+	// 	const addressHasher = new Keccak(256)
+	// 	addressHasher.update(publicKey.substr(4), 'hex')
+	// 	const msgHasher = new Keccak(256)
+	// 	msgHasher.update(JSON.stringify(stats))
 	// 	const ec = new EC('secp256k1');
-	// 	hasher.update(JSON.stringify(stats))
-	// 	const msgHash = hasher.digest('hex')
-	// 	const pubkey = ec.keyFromPublic(pubkey.substr(2), 'hex')
+	// 	const pubkey = ec.keyFromPublic(publicKey.substr(2), 'hex')
 	// 	const signature = {
-	//   r : signature.substr(2, 64),
-	// 	 s : signature.substr(66, 64)
-	//  }
+	//		r : signature.substr(2, 64),
+	//		s : signature.substr(66, 64)
+	//	}
 	//  verified = pubkey.verify(msgHash, signature)
+	//				&& address == addressHasher.digest('hex').substr(24)
+	//				&& msgHash == msgHasher.digest('hex')
 
 	proof := map[string]interface{}{
 		"signature": hexutil.Encode(signature),
-		"publicKey": hexutil.Encode(pubkey),
+		"address":   etherBase,
+		"publicKey": hexutil.Encode(pubkeyBytes),
 		"msgHash":   msgHash.Hex(),
 	}
 
@@ -599,7 +627,7 @@ func (s *Service) reportBlock(conn *websocket.Conn, block *types.Block) error {
 		"block": details,
 	}
 
-	return s.sendStats(conn, "block", stats)
+	return s.sendStats(conn, actionBlock, stats)
 }
 
 // assembleBlockStats retrieves any required metadata to report a single block
@@ -679,7 +707,6 @@ type validatorSet struct {
 type validatorInfo struct {
 	Address      common.Address `json:"address"`
 	Name         string         `json:"name"`
-	Url          string         `json:"url"`
 	Score        string         `json:"score"`
 	BLSPublicKey []byte         `json:"blsPublicKey"`
 	Affiliation  common.Address `json:"affiliation"`
@@ -707,7 +734,6 @@ func (s *Service) assembleValidatorSet(block *types.Block, state vm.StateDB) val
 			Address:      address,
 			Score:        fmt.Sprintf("%d", valData.Score),
 			Name:         address.String(),
-			Url:          "no url",
 			BLSPublicKey: valData.PublicKeysData[64 : 64+blscrypto.PUBLICKEYBYTES],
 			Affiliation:  valData.Affiliation,
 		})
@@ -785,7 +811,7 @@ func (s *Service) reportHistory(conn *websocket.Conn, list []uint64) error {
 		"history": history,
 	}
 
-	return s.sendStats(conn, "history", stats)
+	return s.sendStats(conn, actionHistory, stats)
 }
 
 // pendStats is the information to report about pending transactions.
@@ -813,7 +839,7 @@ func (s *Service) reportPending(conn *websocket.Conn) error {
 		},
 	}
 
-	return s.sendStats(conn, "pending", stats)
+	return s.sendStats(conn, actionPending, stats)
 }
 
 // nodeStats is the information to report about the local node.
@@ -882,5 +908,5 @@ func (s *Service) reportStats(conn *websocket.Conn) error {
 		},
 	}
 
-	return s.sendStats(conn, "stats", stats)
+	return s.sendStats(conn, actionStats, stats)
 }
