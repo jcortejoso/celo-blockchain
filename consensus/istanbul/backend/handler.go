@@ -56,7 +56,7 @@ func (sb *Backend) Protocol() consensus.Protocol {
 func (sb *Backend) HandleMsg(addr common.Address, msg p2p.Msg, peer consensus.Peer) (bool, error) {
 	sb.coreMu.Lock()
 	defer sb.coreMu.Unlock()
-	sb.logger.Warn("HandleMsg called", "code", msg.Code)
+
 	sb.logger.Trace("HandleMsg called", "address", addr, "msg", msg, "peer.Node()", peer.Node())
 
 	if (msg.Code == istanbulMsg) || (msg.Code == istanbulAnnounceMsg) || (msg.Code == istanbulValEnodeShareMsg) || (msg.Code == istanbulFwdMsg) || (msg.Code == istanbulDelegateSign) {
@@ -80,7 +80,7 @@ func (sb *Backend) HandleMsg(addr common.Address, msg p2p.Msg, peer consensus.Pe
 				sb.logger.Warn("woohoo this is the proxied validator, will send a signed message")
 				go sb.delegateSignFeed.Send(istanbul.MessageEvent{Payload: data})
 				// @trevor - seems I need to do this to get proxyNode.peer.Send working inside of ethstats... weird
-				sb.proxyNode.peer.Send(istanbulDelegateSign, "")
+				// sb.proxyNode.peer.Send(istanbulDelegateSign, "")
 			}
 
 			return true, nil
