@@ -151,10 +151,12 @@ func (s *messageSetImpl) EncodeRLP(w io.Writer) error {
 	messageKeys := make([]common.Address, len(s.messages), len(s.messages))
 	messageValues := make([]*istanbul.Message, len(s.messages), len(s.messages))
 
+	i := 0
 	for k, v := range s.messages {
 		fmt.Printf("Adding for encoding: %v -> %v\n", k, v)
-		messageKeys = append(messageKeys, k)
-		messageValues = append(messageValues, v)
+		messageKeys[i] = k
+		messageValues[i] = v
+		i++
 	}
 
 	fmt.Printf("messageValues: %v\n", messageValues)
