@@ -18,11 +18,13 @@ package core
 
 import (
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus/istanbul"
+	"github.com/ethereum/go-ethereum/rlp"
 )
 
 // Construct a new message set to accumulate messages for given sequence/view number.
@@ -114,4 +116,52 @@ func (ms *messageSetImpl) String() string {
 		addresses = append(addresses, v.Address.String())
 	}
 	return fmt.Sprintf("[<%v> %v]", len(ms.messages), strings.Join(addresses, ", "))
+}
+
+// DecodeRLP Impl
+func (s *messageSetImpl) DecodeRLP(stream *rlp.Stream) error {
+	var decoded struct {
+		valSet        istanbul.ValidatorSet
+		messageKeys   []common.Address
+		messageValues []*istanbul.Message
+	}
+
+	if err := stream.Decode(&decoded); err != nil {
+		return err
+	}
+
+	messages := make(map[common.Address]*istanbul.Message)
+	for i, addr := range decoded.messageKeys {
+		messages[addr] = decoded.messageValues[i]
+	}
+
+	*s = messageSetImpl{
+		valSet:     decoded.valSet,
+		messages:   messages,
+		messagesMu: new(sync.Mutex),
+	}
+
+	return nil
+}
+
+// EncodeRLP impl
+func (s *messageSetImpl) EncodeRLP(w io.Writer) error {
+	fmt.Printf("Trying to encode %v\n", s)
+
+	messageKeys := make([]common.Address, len(s.messages), len(s.messages))
+	messageValues := make([]*istanbul.Message, len(s.messages), len(s.messages))
+
+	for k, v := range s.messages {
+		fmt.Printf("Adding for encoding: %v -> %v\n", k, v)
+		messageKeys = append(messageKeys, k)
+		messageValues = append(messageValues, v)
+	}
+
+	fmt.Printf("messageValues: %v\n", messageValues)
+
+	return rlp.Encode(w, []interface{}{
+		s.valSet,
+		messageKeys,
+		messageValues,
+	})
 }
